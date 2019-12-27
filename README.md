@@ -2,7 +2,7 @@
   <img src ="https://raw.githubusercontent.com/shinnytech/tqsdk-python/master/doc/logo.png"/>
 </p>
 <p align="center">
-    <img src ="https://img.shields.io/badge/version-1.2.0-blueviolet.svg"/>
+    <img src ="https://img.shields.io/badge/version-1.4.0-blueviolet.svg"/>
     <img src ="https://img.shields.io/badge/platform-windows|linux|macos-green.svg"/>
     <img src ="https://img.shields.io/badge/python-3.6+-blue.svg" />
     <img src ="https://img.shields.io/github/license/shinnytech/tqsdk-python.svg?color=orange"/>
@@ -54,7 +54,6 @@ Features
 ---------------
 TqSdk 提供的功能可以支持从简单到复杂的各类策略程序.
 
-* **用户无需向期货公司申请AppId, 即可满足穿透式监管信息采集规范要求**
 * **公司级数据运维**，提供当前所有可交易合约从上市开始的 **全部Tick数据和K线数据**
 * 支持市场上90%的期货公司 **实盘交易**
 * 支持 **模拟交易**
@@ -87,7 +86,8 @@ Documentation
 	
 Gui
 -------------------------------------------------
-TqSdk本身不包含任何GUI组件. 免费的 [天勤软件](https://www.shinnytech.com/tianqin) 和 [VS Code插件版](https://doc.shinnytech.com/pysdk/latest/devtools/vscode.html)可以与TqSdk配合使用, 提供完整的图形界面.
+TqSdk本身自带的web_gui功能，简单一行参数即可支持调用图形化界面，详情参加[web_gui](https://doc.shinnytech.com/pysdk/latest/usage/web_gui.html) 
+<img alt="TqSdk web_gui" src="https://raw.githubusercontent.com/shinnytech/tqsdk-python/master/doc/images/web_gui_backtest.png">
 
 About us
 -------------------------------------------------
