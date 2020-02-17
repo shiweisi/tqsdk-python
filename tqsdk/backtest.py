@@ -6,7 +6,6 @@ import json
 import time
 import requests
 import asyncio
-from .__version__ import __version__
 from typing import Union
 from datetime import date, datetime
 from tqsdk.exceptions import BacktestFinished
@@ -467,14 +466,15 @@ class TqReplay(object):
         self._md_url = "ws://%s:%d/t/rmd/front/mobile" % (session["ip"], session["gateway_web_port"])
 
         self._server_status = None
-        try_times = 6 # 最多尝试 6 次
+        timeout = time.time() + 30  # 最多等待 30 s
         # 同步等待复盘服务状态 initializing / running
-        while self._server_status is None and try_times > 0:
+        while self._server_status is None:
             time.sleep(1)
             response = self._get_server_status()
-            try_times -= 1
             if response and response["status"]:
                 self._server_status = response["status"]
+            if timeout < time.time():
+                break
 
         try_times = 30  # 最多尝试 30 次
         # 同步等待复盘服务状态 running
@@ -499,7 +499,7 @@ class TqReplay(object):
     def _prepare_session(self):
         create_session_url = "http://replay.api.shinnytech.com/t/rmd/replay/create_session"
         response = requests.post(create_session_url,
-                                 headers={ "User-Agent": "tqsdk-python %s" % __version__},
+                                 headers=self._api._base_headers,
                                  data=json.dumps({'dt': self._replay_dt.strftime("%Y%m%d")}),
                                  timeout=5)
         if response.status_code == 200:
@@ -510,7 +510,7 @@ class TqReplay(object):
     def _get_server_status(self):
         try:
             response = requests.get(self._session_url,
-                                    headers={ "User-Agent": "tqsdk-python %s" % __version__},
+                                    headers=self._api._base_headers,
                                     timeout=5)
             if response.status_code == 200:
                 return json.loads(response.content)
@@ -523,6 +523,6 @@ class TqReplay(object):
     def _set_server_session(self, data=None):
         if data is not None:
             requests.post(self._session_url,
-                          headers={"User-Agent": "tqsdk-python %s" % __version__},
+                          headers=self._api._base_headers,
                           data=json.dumps(data),
                           timeout=30)

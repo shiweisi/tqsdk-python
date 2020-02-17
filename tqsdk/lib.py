@@ -145,31 +145,36 @@ class TargetPosTask(object, metaclass=TargetPosTaskSingleton):
 
     async def _target_pos_task(self):
         """负责调整目标持仓的task"""
-        async for target_pos in self._pos_chan:
-            # 确定调仓增减方向
-            delta_volume = target_pos - self._pos.pos
-            pending_forzen = 0
-            all_tasks = []
-            for each_priority in self._offset_priority + ",":  # 按不同模式的优先级顺序报出不同的offset单，股指(“昨开”)平昨优先从不平今就先报平昨，原油平今优先("今昨开")就报平今
-                if each_priority == ",":
-                    await gather(*[each._task for each in all_tasks])
-                    pending_forzen = 0
-                    all_tasks = []
-                    continue
-                order_offset, order_dir, order_volume = self._get_order(each_priority, delta_volume, pending_forzen)
-                if order_volume == 0:  # 如果没有则直接到下一种offset
-                    continue
-                elif order_offset != "OPEN":
-                    pending_forzen += order_volume
-                order_task = InsertOrderUntilAllTradedTask(self._api, self._symbol, order_dir, offset=order_offset,
-                                                           volume=order_volume, price=self._price,
-                                                           trade_chan=self._trade_chan)
-                all_tasks.append(order_task)
-                delta_volume -= order_volume if order_dir == "BUY" else -order_volume
+        try:
+            async for target_pos in self._pos_chan:
+                # 确定调仓增减方向
+                delta_volume = target_pos - self._pos.pos
+                pending_forzen = 0
+                all_tasks = []
+                for each_priority in self._offset_priority + ",":  # 按不同模式的优先级顺序报出不同的offset单，股指(“昨开”)平昨优先从不平今就先报平昨，原油平今优先("今昨开")就报平今
+                    if each_priority == ",":
+                        await gather(*[each._task for each in all_tasks])
+                        pending_forzen = 0
+                        all_tasks = []
+                        continue
+                    order_offset, order_dir, order_volume = self._get_order(each_priority, delta_volume, pending_forzen)
+                    if order_volume == 0:  # 如果没有则直接到下一种offset
+                        continue
+                    elif order_offset != "OPEN":
+                        pending_forzen += order_volume
+                    order_task = InsertOrderUntilAllTradedTask(self._api, self._symbol, order_dir, offset=order_offset,
+                                                               volume=order_volume, price=self._price,
+                                                               trade_chan=self._trade_chan)
+                    all_tasks.append(order_task)
+                    delta_volume -= order_volume if order_dir == "BUY" else -order_volume
+        finally:
+            # 执行 task.cancel() 时, 删除掉该 symbol 对应的 TargetPosTask 实例
+            TargetPosTaskSingleton._instances.pop(self._symbol, None)
 
 
 class InsertOrderUntilAllTradedTask(object):
-    """追价下单task, 该task会在行情变化后自动撤单重下，直到全部成交"""
+    """追价下单task, 该task会在行情变化后自动撤单重下，直到全部成交
+     （注：此类主要在tqsdk内部使用，并非简单用法，不建议用户使用）"""
 
     def __init__(self, api, symbol, direction, offset, volume, price="ACTIVE", trade_chan=None):
         """
@@ -263,7 +268,7 @@ class InsertOrderUntilAllTradedTask(object):
 
 
 class InsertOrderTask(object):
-    """下单task"""
+    """下单task （注：此类主要在tqsdk内部使用，并非简单用法，不建议用户使用）"""
 
     def __init__(self, api, symbol, direction, offset, volume, limit_price=None, order_chan=None, trade_chan=None):
         """

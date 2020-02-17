@@ -168,17 +168,18 @@ class TqSim(object):
                     }
                 })
                 self._has_send_init_account = True
-            self._tqsdk_backtest.update(d.get("_tqsdk_backtest", {}))
+            _tqsdk_backtest = d.get("_tqsdk_backtest", {})
+            if _tqsdk_backtest:
+                # 回测时，用 _tqsdk_backtest 对象中 current_dt 作为 TqSim 的 _current_datetime
+                self._tqsdk_backtest.update(_tqsdk_backtest)
+                self._current_datetime = datetime.fromtimestamp(self._tqsdk_backtest["current_dt"] / 1e9).strftime(
+                    "%Y-%m-%d %H:%M:%S.%f")
             for symbol, quote_diff in d.get("quotes", {}).items():
                 if quote_diff is None:
                     continue
                 quote = self._ensure_quote(symbol)
                 quote["datetime"] = quote_diff.get("datetime", quote["datetime"])
-                if self._tqsdk_backtest == {}:
-                    self._current_datetime = max(quote["datetime"], self._current_datetime)
-                else:
-                    self._current_datetime = datetime.fromtimestamp(self._tqsdk_backtest["current_dt"] / 1e9).strftime(
-                        "%Y-%m-%d %H:%M:%S.%f")
+                self._current_datetime = max(quote["datetime"], self._current_datetime)
                 if self._current_datetime > self._trading_day_end:  # 结算
                     self._settle()
                     trading_day = self._api._get_trading_day_from_timestamp(self._get_current_timestamp())
@@ -414,7 +415,7 @@ class TqSim(object):
                         cur_close_volume -= volume
                         opposite_list[0]["volume"] -= volume
                         if opposite_list[0]["volume"] == 0:
-                            opposite_list.pop()
+                            opposite_list.pop(0)
 
         self._tqsdk_stat["profit_volumes"] = sum(p["volume"] for p in profit_logs)  # 盈利手数
         self._tqsdk_stat["loss_volumes"] = sum(l["volume"] for l in loss_logs)  # 亏损手数
@@ -443,9 +444,9 @@ class TqSim(object):
             if self._tqsdk_stat["profit_volumes"] + self._tqsdk_stat["loss_volumes"] else 0
         profit_pre_volume = self._tqsdk_stat["profit_value"] / self._tqsdk_stat["profit_volumes"] if self._tqsdk_stat["profit_volumes"] else 0
         loss_pre_volume = self._tqsdk_stat["loss_value"] / self._tqsdk_stat["loss_volumes"] if self._tqsdk_stat["loss_volumes"] else 0
-        self._tqsdk_stat["profit_loss_ratio"] = profit_pre_volume / loss_pre_volume if loss_pre_volume else float("inf")
-        self._logger.warning("胜率:%.2f,每手盈亏额比例:%.2f,收益率:%.2f%%,年化收益率:%.2f%%,最大回撤:%.2f%%,年化夏普率:%.4f",
-                             self._tqsdk_stat["winning_rate"],
+        self._tqsdk_stat["profit_loss_ratio"] = abs(profit_pre_volume / loss_pre_volume) if loss_pre_volume else float("inf")
+        self._logger.warning("胜率:%.2f%%,盈亏额比例:%.2f,收益率:%.2f%%,年化收益率:%.2f%%,最大回撤:%.2f%%,年化夏普率:%.4f",
+                             self._tqsdk_stat["winning_rate"] * 100,
                              self._tqsdk_stat["profit_loss_ratio"],
                              self._tqsdk_stat["ror"] * 100,
                              self._tqsdk_stat["annual_yield"] * 100,

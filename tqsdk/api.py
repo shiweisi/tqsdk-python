@@ -57,8 +57,8 @@ class TqApi(object):
     DEFAULT_MD_URL = "wss://openmd.shinnytech.com/t/md/front/mobile"
     DEFAULT_TD_URL = "wss://opentd.shinnytech.com/trade/user0"
 
-    def __init__(self, account: Union['TqAccount', TqSim, None] = None, url: Optional[str] = None,
-                 backtest: Union[TqBacktest, TqReplay, None] = None, web_gui: bool = False, debug: Optional[str] = None,
+    def __init__(self, account: Union['TqAccount', TqSim, None] = None, auth: Optional[str] = None, url: Optional[str] = None,
+                 backtest: Union[TqBacktest, TqReplay, None] = None, web_gui: [bool, str] = False, debug: Optional[str] = None,
                  loop: Optional[asyncio.AbstractEventLoop] = None, _ins_url=None, _md_url=None, _td_url=None) -> None:
         """
         创建天勤接口实例
@@ -70,6 +70,10 @@ class TqApi(object):
                 * :py:class:`~tqsdk.api.TqAccount` : 使用实盘账号, 直连行情和交易服务器(不通过天勤终端), 需提供期货公司/帐号/密码
 
                 * :py:class:`~tqsdk.sim.TqSim` : 使用 TqApi 自带的内部模拟账号
+
+            auth (str): [可选]用户权限认证对象
+                * 用户权限认证对象为天勤用户论坛的邮箱和密码，中间以英文逗号分隔，例如： "tianqin@qq.com,123456"
+                天勤论坛注册链接 https://www.shinnytech.com/register-intro/
 
             url (str): [可选]指定服务器的地址
                 * 当 account 为 :py:class:`~tqsdk.api.TqAccount` 类型时, 可以通过该参数指定交易服务器地址, \
@@ -91,7 +95,9 @@ class TqApi(object):
 
             loop(asyncio.AbstractEventLoop): [可选]使用指定的 IOLoop, 默认创建一个新的.
 
-            web_gui(bool): [可选]是否启用 图形化界面 功能, 默认不启用.
+            web_gui(bool/str): [可选]是否启用图形化界面功能, 默认不启用.
+                * 启用图形化界面传入参数 web_gui=True 会每次以随机端口生成网页，也可以直接设置本机IP和端口 web_gui=[ip]:port 为网页地址，
+                ip 可选，默认为 0.0.0.0，参考example 6
                 * 为了图形化界面能够接收到程序传输的数据并且刷新，在程序中，需要循环调用 api.wait_update的形式去更新和获取数据
                 * 推荐打开图形化界面的浏览器为Google Chrome 或 Firefox
 
@@ -123,30 +129,17 @@ class TqApi(object):
 
         Example5::
 
-            # 开启 web_gui 功能
+            # 开启 web_gui 功能，使用默认参数True
             from tqsdk import TqApi
             api = TqApi(web_gui=True)
 
+        Example6::
+
+            # 开启 web_gui 功能，使用本机IP端口固定网址生成
+            from tqsdk import TqApi
+            api = TqApi(web_gui=":9876")  # 等价于 api = TqApi(web_gui="0.0.0.0:9876")
+
         """
-
-        # 记录参数
-        self._account = TqSim() if account is None else account
-        self._backtest = backtest
-        self._ins_url = TqApi.DEFAULT_INS_URL
-        self._md_url = TqApi.DEFAULT_MD_URL
-        self._td_url = TqApi.DEFAULT_TD_URL
-
-        if url and isinstance(self._account, TqSim):
-            self._md_url = url
-        if url and isinstance(self._account, TqAccount):
-            self._td_url = url
-        if _ins_url:
-            self._ins_url = _ins_url
-        if _md_url:
-            self._md_url = _md_url
-        if _td_url:
-            self._td_url = _td_url
-        self._loop = asyncio.SelectorEventLoop() if loop is None else loop  # 创建一个新的 ioloop, 避免和其他框架/环境产生干扰
 
         # 初始化 logger
         self._logger = logging.getLogger("TqApi")
@@ -164,6 +157,56 @@ class TqApi(object):
                 fh = logging.FileHandler(filename=debug)
                 fh.setFormatter(log_format)
                 self._logger.addHandler(fh)
+
+        # 记录参数
+        self._account = TqSim() if account is None else account
+        self._backtest = backtest
+        self._ins_url = TqApi.DEFAULT_INS_URL
+        self._md_url = TqApi.DEFAULT_MD_URL
+        self._td_url = TqApi.DEFAULT_TD_URL
+
+        # 支持用户授权
+        self._access_token = 'eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJobi1MZ3ZwbWlFTTJHZHAtRmlScjV5MUF5MnZrQmpLSFFyQVlnQ0UwR1JjIn0.eyJqdGkiOiJjZDAzM2JhNC1lZTJkLTRhNjUtYmVjNi04NTAyZmQyMjk4NmUiLCJleHAiOjE2MTI0MDQwMTEsIm5iZiI6MCwiaWF0IjoxNTgwODY4MDExLCJpc3MiOiJodHRwczovL2F1dGguc2hpbm55dGVjaC5jb20vYXV0aC9yZWFsbXMvc2hpbm55dGVjaCIsInN1YiI6IjYzMzJhZmUwLWU5OWQtNDc1OC04MjIzLWY5OTBiN2RmOGY4NSIsInR5cCI6IkJlYXJlciIsImF6cCI6InNoaW5ueV90cSIsImF1dGhfdGltZSI6MCwic2Vzc2lvbl9zdGF0ZSI6IjliNTY1MzYzLTRkNmEtNDc0ZS1hYmMzLTQ0YzU0N2ZhMDZjYiIsImFjciI6IjEiLCJzY29wZSI6ImF0dHJpYnV0ZXMiLCJncmFudHMiOnsiZmVhdHVyZXMiOlsiYWR2Il0sImFjY291bnRzIjpbIioiXX19.OtSweF6mXilJNkQwJQR38BTdYWfShxJrlUIxvHRoZ6AZMtJ9pRMx1SS9mmO9SmA_OPBouLybDmPFbcAMK6_Z4hXNYzd1TyXbPMNIPaMg7E12IEe6RxmsP15j-txfB3lC8LJlc9ey9Y-Hbg2goxS9RCj5m5PR8MuHYwx_E1PwEkOkoBw0eJG5jT0gVh8nHN_p7zsbXOo0PVVNxK1ZBuU-t5NeHy3E33LAOxG1VjqAeOrE4YZrprKcHu6ekd4WPy77cllSRMX6Ob2i9uIFmErbtFK76eYJoPmetSEljAcXwjg3_vWcYOj-xzCeFZoaV9ysNvbANzCS0nAelMvWlBHrkA'
+        if auth:
+            comma_index = auth.find(',')
+            email, pwd = auth[:comma_index], auth[comma_index + 1:]
+            headers = {
+                "User-Agent": "tqsdk-python %s" % __version__,
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            response = requests.post("https://auth.shinnytech.com/auth/realms/shinnytech/protocol/openid-connect/token",
+                                     headers=headers,
+                                     data="grant_type=password&username=%s&password=%s&client_id=shinny_tq&client_secret=be30b9f4-6862-488a-99ad-21bde0400081" % (email, pwd),
+                                     timeout=30)
+            if response.status_code == 200:
+                self._access_token = json.loads(response.content)["access_token"]
+                self._logger.info("用户权限认证成功")
+            else:
+                self._logger.warning("用户权限认证失败 (%d,%s)" % (response.status_code, response.content))
+
+        if url and isinstance(self._account, TqSim):
+            self._md_url = url
+        if isinstance(self._account, TqAccount):
+            if url:
+                self._td_url = url
+            else:
+                # 支持分散部署的交易中继网关
+                response = requests.get("https://files.shinnytech.com/broker-list.json", headers=self._base_headers,
+                                        timeout=30)
+                broker_list = json.loads(response.content)
+                if self._account._broker_id not in broker_list:
+                    raise Exception("不支持该期货公司-%s，请联系期货公司。" % (self._account._broker_id))
+                if "TQ" not in broker_list[self._account._broker_id]["category"]:
+                    raise Exception("不支持该期货公司-%s，请联系期货公司。" % (self._account._broker_id))
+                self._td_url = broker_list[self._account._broker_id]["url"]
+        if _ins_url:
+            self._ins_url = _ins_url
+        if _md_url:
+            self._md_url = _md_url
+        if _td_url:
+            self._td_url = _td_url
+        self._loop = asyncio.SelectorEventLoop() if loop is None else loop  # 创建一个新的 ioloop, 避免和其他框架/环境产生干扰
 
         # 初始化loop
         self._send_chan, self._recv_chan = TqChan(self), TqChan(self)  # 消息收发队列
@@ -393,7 +436,7 @@ class TqApi(object):
 
             api = TqApi()
             # 获取 CFFEX.IF1912 按照K线时间向 SHFE.au2006 对齐的K线
-            klines = api.get_kline_serial(["SHFE.au2006", "CFFEX.IF1912"], 5, data_length=10)
+            klines = api.get_kline_serial(["SHFE.au2006", "CFFEX.IF2006"], 5, data_length=10)
             print("多合约K线：", klines.iloc[-1])
             while True:
                 api.wait_update()
@@ -450,7 +493,11 @@ class TqApi(object):
         while not self._loop.is_running() and not serial["init"]:
             # @todo: merge diffs
             if not self.wait_update(deadline=deadline):
-                raise Exception("获取 %s (%d) 的K线超时，请检查客户端及网络是否正常，且合约代码填写正确" % (symbol, duration_seconds))
+                if len(symbol) > 1:
+                    raise Exception("获取 %s (%d) 的K线超时，请检查客户端及网络是否正常，或任一副合约在主合约行情的最后 %d 秒内无可对齐的K线" % (
+                    symbol, duration_seconds, 8964 * duration_seconds))
+                else:
+                    raise Exception("获取 %s (%d) 的K线超时，请检查客户端及网络是否正常" % (symbol, duration_seconds))
         return serial["df"]
 
     # ----------------------------------------------------------------------
@@ -1182,10 +1229,7 @@ class TqApi(object):
 
     def _fetch_symbol_info(self, url):
         """获取合约信息"""
-        rsp = requests.get(url, headers={
-            "User-Agent": "tqsdk-python %s" % __version__,
-            "Accept": "application/json"
-        }, timeout=30)
+        rsp = requests.get(url, headers=self._base_headers, timeout=30)
         rsp.raise_for_status()
         return {
             k: {
@@ -1413,42 +1457,6 @@ class TqApi(object):
                                              int(serial["array"][-1, 1]) + 1, data)
         serial["update_row"] = serial["width"]
 
-    def _process_chart_data(self, serial, symbol, duration, col, count, right, data):
-        if not data:
-            return
-        if ".open" in data:
-            data_type = "KSERIAL"
-        elif ".type" in data:
-            data_type = data[".type"]
-            rows = np.where(np.not_equal(data_type, None))[0]
-            if len(rows) == 0:
-                return
-            data_type = data_type[rows[0]]
-        else:
-            data_type = "LINE"
-        if data_type in {"LINE", "DOT", "DASH", "BAR"}:
-            self._send_series_data(symbol, duration, col, {
-                "type": "SERIAL",
-                "range_left": right - count,
-                "range_right": right - 1,
-                "data": data[""].tolist(),
-                "style": data_type,
-                "color": int(data.get(".color", [0xFFFF0000])[-1]),
-                "width": int(data.get(".width", [1])[-1]),
-                "board": data.get(".board", ["MAIN"])[-1],
-            })
-        elif data_type == "KSERIAL":
-            self._send_series_data(symbol, duration, col, {
-                "type": "KSERIAL",
-                "range_left": right - count,
-                "range_right": right - 1,
-                "open": data[".open"].tolist(),
-                "high": data[".high"].tolist(),
-                "low": data[".low"].tolist(),
-                "close": data[".close"].tolist(),
-                "board": data.get(".board", ["MAIN"])[-1],
-            })
-
     def _process_chart_data_for_web(self, serial, symbol, duration, col, count, right, data):
         # 与 _process_chart_data 函数功能类似，但是处理成符合 diff 协议的序列，在 js 端就不需要特殊处理了
         if not data:
@@ -1463,41 +1471,40 @@ class TqApi(object):
             data_type = data_type[rows[0]]
         else:
             data_type = "LINE"
+        send_data = {
+            "type": "KSERIAL" if data_type == "KSERIAL" else "SERIAL",
+            "range_left": right - count,
+            "range_right": right - 1,
+            "data": {}
+        }
+        # 在执行 _update_serial_single 时，有可能将未赋值的字段设置为 None, 这里如果为 None 则不发送这个 board 字段，
+        # 因为 None 在 diff 协议中的含义是删除这个字段，这里仅仅表示不赋新值，下面的 color, width 同理
+        board = data.get(".board", ["MAIN"])[-1]
+        if board:
+            send_data["board"] = data.get(".board", ["MAIN"])[-1]
         if data_type in {"LINE", "DOT", "DASH", "BAR"}:
-            send_data = {}
-            range_left = right - count
+            send_data["style"] = data_type
+            color = data.get(".color", ["#FF0000"])[-1]
+            if color:
+                send_data["color"] = color if isinstance(color, str) else int(color)
+            width = int(data.get(".width", [1])[-1])
+            if width:
+                send_data["width"] = int(data.get(".width", [1])[-1])
             for i in range(count):
-                send_data[i + range_left] = {
+                send_data["data"][i + right - count] = {
                     # 数据结构与 KSERIAL 保持一致，只有一列的时候，默认 key 值取 "value"
                     "value": data[""][i]
                 }
-            self._send_series_data(symbol, duration, col, {
-                "type": "SERIAL",
-                "data": send_data,
-                "style": data_type,
-                "range_left": right - count,
-                "range_right": right - 1,
-                "color": int(data.get(".color", [0xFFFF0000])[-1]),
-                "width": int(data.get(".width", [1])[-1]),
-                "board": data.get(".board", ["MAIN"])[-1]
-            }, aid="set_web_chart_data")
+            self._send_series_data(symbol, duration, col, send_data, aid="set_chart_data")
         elif data_type == "KSERIAL":
-            send_data = {}
-            range_left = right - count
             for i in range(count):
-                send_data[i + range_left] = {
+                send_data["data"][i + right - count] = {
                     "open": data[".open"][i],
                     "high": data[".high"][i],
                     "low": data[".low"][i],
                     "close": data[".close"][i]
                 }
-            self._send_series_data(symbol, duration, col, {
-                "type": "KSERIAL",
-                "data": send_data,
-                "range_left": right - count,
-                "range_right": right - 1,
-                "board": data.get(".board", ["MAIN"])[-1]
-            }, aid="set_web_chart_data")
+            self._send_series_data(symbol, duration, col, send_data, aid="set_chart_data")
 
     def _send_series_data(self, symbol, duration, serial_id, serial_data, aid="set_chart_data"):
         pack = {
@@ -1576,9 +1583,7 @@ class TqApi(object):
         un_processed = False  # 重连后尚未处理完标志
         keywords = {
             "max_size": None,
-            "extra_headers": {
-                "User-Agent": "tqsdk-python %s" % __version__
-            }
+            "extra_headers": self._base_headers
         }
         if url.startswith("wss://"):
             ssl_context = ssl.create_default_context()
@@ -1769,6 +1774,8 @@ class TqApi(object):
                         resend_request.pop(pack["chart_id"], None)
                 elif aid == "req_login":
                     resend_request["req_login"] = pack
+                elif aid == "confirm_settlement":
+                    resend_request["confirm_settlement"] = pack
                 msg = json.dumps(pack)
                 await client.send(msg)
                 self._logger.debug("websocket message sent to %s: %s", url, msg)
@@ -1784,6 +1791,15 @@ class TqApi(object):
                 for slave in self._slaves:
                     slave._slave_recv_pack(copy.deepcopy(pack))
             self._pending_diffs.extend(pack.get("data", []))
+
+    @property
+    def _base_headers(self):
+        headers = {
+            "User-Agent": "tqsdk-python %s" % __version__,
+            "Accept": "application/json",
+            "Authorization": "Bearer %s" % self._access_token
+        }
+        return headers
 
     @staticmethod
     def _merge_diff(result, diff, prototype, persist):
@@ -1979,7 +1995,7 @@ class TqApi(object):
             self._master._slave_send_pack(pack)
 
     def draw_text(self, base_k_dataframe: pd.DataFrame, text: str, x: Optional[int] = None, y: Optional[float] = None,
-                  id: Optional[str] = None, board: str = "MAIN", color: int = 0xFFFF0000) -> None:
+                  id: Optional[str] = None, board: str = "MAIN", color: Union[str, int] = "red") -> None:
         """
         配合天勤使用时, 在天勤的行情图上绘制一个字符串
 
@@ -1996,7 +2012,9 @@ class TqApi(object):
 
             board (str): 选择图板, 可选, 缺省为 "MAIN" 表示绘制在主图
 
-            color (ARGB): 文本颜色, 可选, 缺省为红色.
+            color (str/int): 文本颜色, 可选, 缺省为 "red"
+                * str : 符合 CSS Color 命名规则的字符串, 例如: "red", "#FF0000", "#FF0000FF", "rgb(255, 0, 0)", "rgba(255, 0, 0, .5)"
+                * int : 十六进制整数表示颜色, ARGB, 例如: 0xffff0000
 
         Example::
 
@@ -2021,7 +2039,7 @@ class TqApi(object):
         self._send_chart_data(base_k_dataframe, id, serial)
 
     def draw_line(self, base_k_dataframe: pd.DataFrame, x1: int, y1: float, x2: int, y2: float,
-                  id: Optional[str] = None, board: str = "MAIN", line_type: str = "LINE", color: int = 0xFFFF0000,
+                  id: Optional[str] = None, board: str = "MAIN", line_type: str = "LINE", color: Union[str, int] = "red",
                   width: int = 1) -> None:
         """
         配合天勤使用时, 在天勤的行情图上绘制一个直线/线段/射线
@@ -2043,7 +2061,9 @@ class TqApi(object):
 
             line_type ("LINE" | "SEG" | "RAY"): 画线类型, 可选, 默认为 LINE. LINE=直线, SEG=线段, RAY=射线
 
-            color (ARGB): 线颜色, 可选, 缺省为 红色
+            color (str/int): 线颜色, 可选, 缺省为 "red"
+                * str : 符合 CSS Color 命名规则的字符串, 例如: "red", "#FF0000", "#FF0000FF", "rgb(255, 0, 0)", "rgba(255, 0, 0, .5)"
+                * int : 十六进制整数表示颜色, ARGB, 例如: 0xffff0000
 
             width (int): 线宽度, 可选, 缺省为 1
         """
@@ -2062,7 +2082,7 @@ class TqApi(object):
         self._send_chart_data(base_k_dataframe, id, serial)
 
     def draw_box(self, base_k_dataframe: pd.DataFrame, x1: int, y1: float, x2: int, y2: float, id: Optional[str] = None,
-                 board: str = "MAIN", bg_color: int = 0x00000000, color: int = 0xFFFF0000, width: int = 1) -> None:
+                 board: str = "MAIN", bg_color: Union[str, int] = "black", color: Union[str, int] = "red", width: int = 1) -> None:
         """
         配合天勤使用时, 在天勤的行情图上绘制一个矩形
 
@@ -2081,9 +2101,13 @@ class TqApi(object):
 
             board (str): 选择图板, 可选, 缺省为 "MAIN" 表示绘制在主图
 
-            bg_color (ARGB): 填充颜色, 可选, 缺省为 空
+            bg_color (str/int): 填充颜色, 可选, 缺省为 "black"
+                * str : 符合 CSS Color 命名规则的字符串, 例如: "red", "#FF0000", "#FF0000FF", "rgb(255, 0, 0)", "rgba(255, 0, 0, .5)"
+                * int : 十六进制整数表示颜色, ARGB, 例如: 0xffff0000
 
-            color (ARGB): 边框颜色, 可选, 缺省为 红色
+            color (str/int): 边框颜色, 可选, 缺省为 "red"
+                * str : 符合 CSS Color 命名规则的字符串, 例如: "red", "#FF0000", "#FF0000FF", "rgb(255, 0, 0)", "rgba(255, 0, 0, .5)"
+                * int : 十六进制整数表示颜色, ARGB, 例如: 0xffff0000
 
             width (int): 边框宽度, 可选, 缺省为 1
 
@@ -2154,6 +2178,7 @@ class TqAccount(object):
         """
         if bool(front_broker) != bool(front_url):
             raise Exception("front_broker 和 front_url 参数需同时填写")
+
         self._broker_id = broker_id
         self._account_id = account_id
         self._password = password
@@ -2198,6 +2223,9 @@ class TqAccount(object):
             req["broker_id"] = self._front_broker
             req["front"] = self._front_url
         await td_send_chan.send(req)
+        await td_send_chan.send({
+            "aid": "confirm_settlement"
+        })  # 自动发送确认结算单
         md_task = api.create_task(self._md_handler(api_recv_chan, md_send_chan, md_recv_chan))
         td_task = api.create_task(self._td_handler(api_recv_chan, td_send_chan, td_recv_chan))
         try:

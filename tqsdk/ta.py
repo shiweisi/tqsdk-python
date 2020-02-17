@@ -4,6 +4,7 @@ __author__ = 'chengzhi'
 
 """
 tqsdk.ta 模块包含了一批常用的技术指标计算函数
+(函数返回值类型保持为 pandas.Dataframe)
 """
 
 import numpy as np
@@ -234,6 +235,8 @@ def MACD(df, short, long, m):
 
     Returns:
         pandas.DataFrame: 返回的DataFrame包含3列, 是"diff", "dea"和"bar", 分别代表离差值, DIFF的指数加权移动平均线, MACD的柱状线
+
+        (注: 因 DataFrame 有diff()函数，因此获取到此指标后："diff"字段使用 macd["diff"] 方式来取值，而非 macd.diff )
 
     Example::
 
