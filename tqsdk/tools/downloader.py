@@ -3,9 +3,13 @@
 __author__ = 'yangyang'
 
 import csv
-from typing import Union, List
 from datetime import date, datetime
+from typing import Union, List
+
 from tqsdk.api import TqApi
+from tqsdk.datetime import _get_trading_day_start_time, _get_trading_day_end_time
+from tqsdk.diff import _get_obj
+from tqsdk.utils import _generate_uuid
 
 
 class DataDownloader:
@@ -66,15 +70,17 @@ class DataDownloader:
         if isinstance(start_dt, datetime):
             self._start_dt_nano = int(start_dt.timestamp() * 1e9)
         else:
-            self._start_dt_nano = TqApi._get_trading_day_start_time(
-                int(datetime(start_dt.year, start_dt.month, start_dt.day).timestamp()) * 1000000000)
+            self._start_dt_nano = _get_trading_day_start_time(int(datetime(start_dt.year, start_dt.month, start_dt.day).timestamp()) * 1000000000)
         if isinstance(end_dt, datetime):
             self._end_dt_nano = int(end_dt.timestamp() * 1e9)
         else:
-            self._end_dt_nano = TqApi._get_trading_day_end_time(
-                int(datetime(end_dt.year, end_dt.month, end_dt.day).timestamp()) * 1000000000)
+            self._end_dt_nano = _get_trading_day_end_time(int(datetime(end_dt.year, end_dt.month, end_dt.day).timestamp()) * 1000000000)
         self._current_dt_nano = self._start_dt_nano
         self._symbol_list = symbol_list if isinstance(symbol_list, list) else [symbol_list]
+        # 检查合约代码是否存在
+        for symbol in self._symbol_list:
+            if symbol not in self._api._data.get("quotes", {}):
+                raise Exception("代码 %s 不存在, 请检查合约代码是否填写正确" % (symbol))
         self._dur_nano = dur_sec * 1000000000
         if self._dur_nano == 0 and len(self._symbol_list) != 1:
             raise Exception("Tick序列不支持多合约")
@@ -104,7 +110,7 @@ class DataDownloader:
         """下载数据, 多合约横向按时间对齐"""
         chart_info = {
             "aid": "set_chart",
-            "chart_id": self._api._generate_chart_id("downloader"),
+            "chart_id": _generate_uuid("PYSDK_downloader"),
             "ins_list": ",".join(self._symbol_list),
             "duration": self._dur_nano,
             "view_width": 2000,
@@ -113,7 +119,7 @@ class DataDownloader:
         }
         # 还没有发送过任何请求, 先请求定位左端点
         await self._api._send_chan.send(chart_info)
-        chart = self._api._get_obj(self._api._data, ["charts", chart_info["chart_id"]])
+        chart = _get_obj(self._api._data, ["charts", chart_info["chart_id"]])
         current_id = None  # 当前数据指针
         csv_header = []
         data_cols = ["open", "high", "low", "close", "volume", "open_oi", "close_oi"] if self._dur_nano != 0 else \
@@ -122,14 +128,14 @@ class DataDownloader:
         serials = []
         for symbol in self._symbol_list:
             path = ["klines", symbol, str(self._dur_nano)] if self._dur_nano != 0 else ["ticks", symbol]
-            serial = self._api._get_obj(self._api._data, path)
+            serial = _get_obj(self._api._data, path)
             serials.append(serial)
         try:
             with open(self._csv_file_name, 'w', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile, dialect='excel')
                 async with self._api.register_update_notify() as update_chan:
                     async for _ in update_chan:
-                        if not (chart_info.items() <= self._api._get_obj(chart, ["state"]).items()):
+                        if not (chart_info.items() <= _get_obj(chart, ["state"]).items()):
                             # 当前请求还没收齐回应, 不应继续处理
                             continue
                         left_id = chart.get("left_id", -1)

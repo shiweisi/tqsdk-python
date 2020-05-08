@@ -2,15 +2,20 @@
 #  -*- coding: utf-8 -*-
 __author__ = 'chengzhi'
 
+import asyncio
 import json
 import time
-import requests
-import asyncio
-from typing import Union
 from datetime import date, datetime
+from typing import Union
+
+import requests
+
+from tqsdk.channel import TqChan
+from tqsdk.datetime import _get_trading_day_start_time, _get_trading_day_end_time
+from tqsdk.diff import _merge_diff, _get_obj
+from tqsdk.entity import Entity
 from tqsdk.exceptions import BacktestFinished
-from tqsdk.objs import Entity
-import tqsdk.api
+from tqsdk.utils import _generate_uuid
 
 
 class TqBacktest(object):
@@ -55,15 +60,13 @@ class TqBacktest(object):
         if isinstance(start_dt, datetime):
             self._start_dt = int(start_dt.timestamp() * 1e9)
         elif isinstance(start_dt, date):
-            self._start_dt = tqsdk.api.TqApi._get_trading_day_start_time(
-                int(datetime(start_dt.year, start_dt.month, start_dt.day).timestamp()) * 1000000000)
+            self._start_dt = _get_trading_day_start_time(int(datetime(start_dt.year, start_dt.month, start_dt.day).timestamp()) * 1000000000)
         else:
             raise Exception("回测起始时间(start_dt)类型 %s 错误, 请检查 start_dt 数据类型是否填写正确" % (type(start_dt)))
         if isinstance(end_dt, datetime):
             self._end_dt = int(end_dt.timestamp() * 1e9)
         elif isinstance(end_dt, date):
-            self._end_dt = tqsdk.api.TqApi._get_trading_day_end_time(
-                int(datetime(end_dt.year, end_dt.month, end_dt.day).timestamp()) * 1000000000)
+            self._end_dt = _get_trading_day_end_time(int(datetime(end_dt.year, end_dt.month, end_dt.day).timestamp()) * 1000000000)
         else:
             raise Exception("回测结束时间(end_dt)类型 %s 错误, 请检查 end_dt 数据类型是否填写正确" % (type(end_dt)))
         self._current_dt = self._start_dt
@@ -125,6 +128,7 @@ class TqBacktest(object):
             for s in self._serials.values():
                 await s["generator"].aclose()
             md_task.cancel()
+            await asyncio.gather(md_task, return_exceptions=True)
 
     async def _md_handler(self):
         async for pack in self._md_recv_chan:
@@ -132,11 +136,11 @@ class TqBacktest(object):
                 "aid": "peek_message"
             })
             for d in pack.get("data", []):
-                tqsdk.api.TqApi._merge_diff(self._data, d, self._api._prototype, False)
+                _merge_diff(self._data, d, self._api._prototype, False)
 
     async def _send_snapshot(self):
         """发送初始合约信息"""
-        async with tqsdk.api.TqChan(self._api, last_only=True) as update_chan:  # 等待与行情服务器连接成功
+        async with TqChan(self._api, last_only=True) as update_chan:  # 等待与行情服务器连接成功
             self._data["_listener"].add(update_chan)
             while self._data.get("mdhis_more_data", True):
                 await update_chan.recv()
@@ -171,6 +175,8 @@ class TqBacktest(object):
                     "expire_datetime": quote.get("expire_datetime"),
                     "delivery_month": quote.get("delivery_month"),
                     "delivery_year": quote.get("delivery_year"),
+                    "option_class": quote.get("option_class", ""),
+                    "product_id": quote.get("product_id", ""),
                 }
         self._diffs.append({
             "quotes": quotes,
@@ -275,23 +281,23 @@ class TqBacktest(object):
         # 因此将 view_width 和 focus_position 设置成一样，这样 focus_datetime 所对应的 k线刚好位于屏幕外
         chart_info = {
             "aid": "set_chart",
-            "chart_id": tqsdk.api.TqApi._generate_chart_id("backtest"),
+            "chart_id": _generate_uuid("PYSDK_backtest"),
             "ins_list": ins,
             "duration": dur,
             "view_width": 8964,  # 设为8964原因：可满足用户所有的订阅长度，并在backtest中将所有的 相同合约及周期 的K线用同一个serial存储
             "focus_datetime": int(self._current_dt),
             "focus_position": 8964,
         }
-        chart = tqsdk.api.TqApi._get_obj(self._data, ["charts", chart_info["chart_id"]])
+        chart = _get_obj(self._data, ["charts", chart_info["chart_id"]])
         current_id = None  # 当前数据指针
-        serial = tqsdk.api.TqApi._get_obj(self._data, ["klines", ins, str(dur)] if dur != 0 else ["ticks", ins])
-        async with tqsdk.api.TqChan(self._api, last_only=True) as update_chan:
+        serial = _get_obj(self._data, ["klines", ins, str(dur)] if dur != 0 else ["ticks", ins])
+        async with TqChan(self._api, last_only=True) as update_chan:
             serial["_listener"].add(update_chan)
             chart["_listener"].add(update_chan)
             await self._md_send_chan.send(chart_info.copy())
             try:
                 async for _ in update_chan:
-                    if not (chart_info.items() <= tqsdk.api.TqApi._get_obj(chart, ["state"]).items()):
+                    if not (chart_info.items() <= _get_obj(chart, ["state"]).items()):
                         # 当前请求还没收齐回应, 不应继续处理
                         continue
                     left_id = chart.get("left_id", -1)
@@ -361,8 +367,7 @@ class TqBacktest(object):
                                 }
                             }
                             timestamp = item[
-                                "datetime"] if dur < 86400000000000 else tqsdk.api.TqApi._get_trading_day_start_time(
-                                item["datetime"])
+                                "datetime"] if dur < 86400000000000 else _get_trading_day_start_time(item["datetime"])
                             if timestamp > self._end_dt:  # 超过结束时间
                                 return
                             yield timestamp, diff, None  # K线刚生成时的数据都为开盘价
@@ -378,8 +383,8 @@ class TqBacktest(object):
                                 }
                             }
                             timestamp = item[
-                                            "datetime"] + dur - 1000 if dur < 86400000000000 else tqsdk.api.TqApi._get_trading_day_end_time(
-                                item["datetime"])
+                                            "datetime"] + dur - 1000 if dur < 86400000000000 else _get_trading_day_end_time(
+                                item["datetime"]) - 999
                             if timestamp > self._end_dt:  # 超过结束时间
                                 return
                             yield timestamp, diff, self._get_quotes_from_kline(self._data["quotes"][ins], timestamp,
@@ -492,9 +497,12 @@ class TqReplay(object):
             raise Exception("无法创建复盘服务器，请检查复盘日期后重试。")
 
     async def _run(self):
-        while True:
-            self._set_server_session({"aid": "heartbeat"})
-            await asyncio.sleep(30)
+        try:
+            while True:
+                self._set_server_session({"aid": "heartbeat"})
+                await asyncio.sleep(30)
+        finally:
+            self._set_server_session({"aid": "terminate"})
 
     def _prepare_session(self):
         create_session_url = "http://replay.api.shinnytech.com/t/rmd/replay/create_session"

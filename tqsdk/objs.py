@@ -2,40 +2,10 @@
 #:  -*- coding: utf-8 -*-
 __author__ = 'chengzhi'
 
-import weakref
-from collections.abc import MutableMapping
 import copy
 
-
-class Entity(MutableMapping):
-    def _instance_entity(self, path):
-        self._path = path
-        self._listener = weakref.WeakSet()
-
-    def __setitem__(self, key, value):
-        return self.__dict__.__setitem__(key, value)
-
-    def __delitem__(self, key):
-        return self.__dict__.__delitem__(key)
-
-    def __getitem__(self, key):
-        return self.__dict__.__getitem__(key)
-
-    def __iter__(self):
-        return iter({k: v for k, v in self.__dict__.items() if not k.startswith("_")})
-
-    def __len__(self):
-        return len({k: v for k, v in self.__dict__.items() if not k.startswith("_")})
-
-    def __str__(self):
-        return str({k: v for k, v in self.__dict__.items() if not k.startswith("_")})
-
-    def __repr__(self):
-        return '{}, D({})'.format(super(Entity, self).__repr__(),
-                                  {k: v for k, v in self.__dict__.items() if not k.startswith("_")})
-
-    def copy(self):
-        return copy.copy(self)
+from tqsdk.diff import _get_obj
+from tqsdk.entity import Entity
 
 
 class Quote(Entity):
@@ -147,6 +117,10 @@ class Quote(Entity):
         self.delivery_month = 0
         #: 到期年
         self.delivery_year = 0
+        #: 期权方向
+        self.option_class = ""
+        #: 品种代码
+        self.product_id = ""
 
     def _instance_entity(self, path):
         super(Quote, self)._instance_entity(path)
@@ -261,14 +235,18 @@ class Account(Entity):
         self._api = api
         #: 币种
         self.currency = ""
-        #: 昨日账户权益
+        #: 昨日账户权益(不包含期权)
         self.pre_balance = float("nan")
-        #: 静态权益 （静态权益 = 昨日结算的权益 + 今日入金 - 今日出金, 以服务器查询ctp后返回的金额为准）
+        #: 静态权益 （静态权益 = 昨日结算的权益 + 今日入金 - 今日出金, 以服务器查询ctp后返回的金额为准）(不包含期权)
         self.static_balance = float("nan")
-        #: 账户权益 （账户权益 = 动态权益 = 静态权益 + 平仓盈亏 + 持仓盈亏 - 手续费）
+        #: 账户权益 （账户权益 = 动态权益 = 静态权益 + 平仓盈亏 + 持仓盈亏 - 手续费 + 权利金 + 期权市值）
         self.balance = float("nan")
-        #: 可用资金
+        #: 可用资金（可用资金 = 账户权益 - 冻结保证金 - 保证金 - 冻结权利金 - 冻结手续费 - 期权市值）
         self.available = float("nan")
+        #: 期货公司返回的balance（ctp_balance = 静态权益 + 平仓盈亏 + 持仓盈亏 - 手续费 + 权利金）
+        self.ctp_balance = float("nan")
+        #: 期货公司返回的available（ctp_available = ctp_balance - 保证金 - 冻结保证金 - 冻结手续费 - 冻结权利金）
+        self.ctp_available = float("nan")
         #: 浮动盈亏
         self.float_profit = float("nan")
         #: 持仓盈亏
@@ -285,14 +263,16 @@ class Account(Entity):
         self.commission = float("nan")
         #: 冻结权利金
         self.frozen_premium = float("nan")
-        #: 本交易日内交纳的权利金
+        #: 本交易日内收入-交纳的权利金
         self.premium = float("nan")
         #: 本交易日内的入金金额
         self.deposit = float("nan")
         #: 本交易日内的出金金额
         self.withdraw = float("nan")
-        #: 风险度
+        #: 风险度（风险度 = 保证金 / 账户权益）
         self.risk_ratio = float("nan")
+        #: 期权市值
+        self.market_value = float("nan")
 
 
 class Position(Entity):
@@ -340,17 +320,17 @@ class Position(Entity):
         self.open_price_long = float("nan")
         #: 空头开仓均价
         self.open_price_short = float("nan")
-        #: 多头开仓市值
+        #: 多头开仓成本
         self.open_cost_long = float("nan")
-        #: 空头开仓市值
+        #: 空头开仓成本
         self.open_cost_short = float("nan")
         #: 多头持仓均价
         self.position_price_long = float("nan")
         #: 空头持仓均价
         self.position_price_short = float("nan")
-        #: 多头持仓市值
+        #: 多头持仓成本
         self.position_cost_long = float("nan")
-        #: 空头持仓市值
+        #: 空头持仓成本
         self.position_cost_short = float("nan")
         #: 多头浮动盈亏
         self.float_profit_long = float("nan")
@@ -370,6 +350,12 @@ class Position(Entity):
         self.margin_short = float("nan")
         #: 占用保证金
         self.margin = float("nan")
+        #: 期权权利方市值(始终 >= 0)
+        self.market_value_long = float("nan")
+        #: 期权义务方市值(始终 <= 0)
+        self.market_value_short = float("nan")
+        #: 期权市值
+        self.market_value = float("nan")
 
     @property
     def pos(self):
@@ -411,7 +397,7 @@ class Position(Entity):
 
         :return: dict, 其中每个元素的key为委托单ID, value为 :py:class:`~tqsdk.objs.Order`
         """
-        tdict = self._api._get_obj(self._api._data, ["trade", self._api._account._account_id, "orders"])
+        tdict = _get_obj(self._api._data, ["trade", self._api._account._account_id, "orders"])
         fts = {order_id: order for order_id, order in tdict.items() if (not order_id.startswith(
             "_")) and order.instrument_id == self.instrument_id and order.exchange_id == self.exchange_id and order.status == "ALIVE"}
         return fts
@@ -452,6 +438,7 @@ class Order(Entity):
         self.last_msg = ""
         #: 委托单状态, ALIVE=有效, FINISHED=已完
         self.status = ""
+
         self._this_session = False
 
     @property
@@ -494,7 +481,7 @@ class Order(Entity):
 
         :return: 当委托单部分成交或全部成交时, 返回成交部分的平均成交价. 无任何成交时, 返回 nan
         """
-        tdict = self._api._get_obj(self._api._data, ["trade", self._api._account._account_id, "trades"])
+        tdict = _get_obj(self._api._data, ["trade", self._api._account._account_id, "trades"])
         sum_volume = sum([trade.volume for trade_id, trade in tdict.items() if
                           (not trade_id.startswith("_")) and trade.order_id == self.order_id])
         if sum_volume == 0:
@@ -510,7 +497,7 @@ class Order(Entity):
 
         :return: dict, 其中每个元素的key为成交ID, value为 :py:class:`~tqsdk.objs.Trade`
         """
-        tdict = self._api._get_obj(self._api._data, ["trade", self._api._account._account_id, "trades"])
+        tdict = _get_obj(self._api._data, ["trade", self._api._account._account_id, "trades"])
         fts = {trade_id: trade for trade_id, trade in tdict.items() if
                (not trade_id.startswith("_")) and trade.order_id == self.order_id}
         return fts

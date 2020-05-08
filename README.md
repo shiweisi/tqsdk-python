@@ -2,7 +2,7 @@
   <img src ="https://raw.githubusercontent.com/shinnytech/tqsdk-python/master/doc/logo.png"/>
 </p>
 <p align="center">
-    <img src ="https://img.shields.io/badge/version-1.6.1-blueviolet.svg"/>
+    <img src ="https://img.shields.io/badge/version-1.7.0-blueviolet.svg"/>
     <img src ="https://img.shields.io/badge/platform-windows|linux|macos-green.svg"/>
     <img src ="https://img.shields.io/badge/python-3.6+-blue.svg" />
     <img src ="https://img.shields.io/github/license/shinnytech/tqsdk-python.svg?color=orange"/>
@@ -86,7 +86,7 @@ Documentation
 	
 Gui
 -------------------------------------------------
-TqSdk本身自带的web_gui功能，简单一行参数即可支持调用图形化界面，详情参加[web_gui](https://doc.shinnytech.com/pysdk/latest/usage/web_gui.html) 
+TqSdk本身自带的web_gui功能，简单一行参数即可支持调用图形化界面，详情参考[web_gui](https://doc.shinnytech.com/pysdk/latest/usage/web_gui.html) 
 <img alt="TqSdk web_gui" src="https://raw.githubusercontent.com/shinnytech/tqsdk-python/master/doc/images/web_gui_backtest.png">
 
 About us

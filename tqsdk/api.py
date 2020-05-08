@@ -3,10 +3,12 @@
 """
 天勤接口的PYTHON封装, 提供以下功能
 
-* 连接行情和交易服务器或天勤终端的websocket扩展接口, 接收行情及交易推送数据
+* 连接行情和交易服务器, 接收行情及交易推送数据
 * 在内存中存储管理一份完整的业务数据(行情+交易), 并在接收到新数据包时更新内存数据
 * 通过一批函数接口, 支持用户代码访问业务数据
 * 发送交易指令
+* 提供本地的模拟交易账户，同时完成撮合成交
+* 支持回测功能
 
 
 * PYTHON SDK使用文档: https://doc.shinnytech.com/pysdk/latest/
@@ -15,49 +17,45 @@
 """
 __author__ = 'chengzhi'
 
-import re
+import asyncio
+import copy
+import functools
 import json
+import logging
+import os
+import re
 import ssl
-import uuid
 import sys
 import time
-import logging
-import copy
-import ctypes
-import asyncio
-import functools
-import certifi
-import websockets
-import requests
-import random
-import base64
-import os
 from datetime import datetime
 from typing import Union, List, Any, Optional
-import pandas as pd
+
+import certifi
 import numpy as np
-from .__version__ import __version__
-from tqsdk.sim import TqSim
-from tqsdk.objs import Entity, Quote, Kline, Tick, Account, Position, Order, Trade
+import pandas as pd
+import requests
+import websockets
+
+from tqsdk.account import TqAccount
 from tqsdk.backtest import TqBacktest, TqReplay
+from tqsdk.channel import TqChan
+from tqsdk.diff import _merge_diff, _get_obj, _is_key_exist
+from tqsdk.entity import Entity
+from tqsdk.objs import Quote, Kline, Tick, Account, Position, Order, Trade
+from tqsdk.sim import TqSim
 from tqsdk.tqwebhelper import TqWebHelper
+from tqsdk.utils import _generate_uuid
+from .__version__ import __version__
 
 
 class TqApi(object):
     """
     天勤接口及数据管理类
 
-    该类中所有参数只针对天勤外部IDE编写使用, 在天勤内使用 api = TqApi() 即可指定为当前天勤终端登录用户
-
     通常情况下, 一个线程中 **应该只有一个** TqApi的实例, 它负责维护网络连接, 接收行情及账户数据, 并在内存中维护业务数据截面
     """
 
-    RD = random.Random()  # 初始化随机数引擎
-    DEFAULT_INS_URL = "https://openmd.shinnytech.com/t/md/symbols/latest.json"
-    DEFAULT_MD_URL = "wss://openmd.shinnytech.com/t/md/front/mobile"
-    DEFAULT_TD_URL = "wss://opentd.shinnytech.com/trade/user0"
-
-    def __init__(self, account: Union['TqAccount', TqSim, None] = None, auth: Optional[str] = None, url: Optional[str] = None,
+    def __init__(self, account: Union[TqAccount, TqSim, None] = None, auth: Optional[str] = None, url: Optional[str] = None,
                  backtest: Union[TqBacktest, TqReplay, None] = None, web_gui: [bool, str] = False, debug: Optional[str] = None,
                  loop: Optional[asyncio.AbstractEventLoop] = None, _ins_url=None, _md_url=None, _td_url=None) -> None:
         """
@@ -65,9 +63,9 @@ class TqApi(object):
 
         Args:
             account (None/TqAccount/TqSim): [可选]交易账号:
-                * None: 账号将根据命令行参数决定, 默认为 :py:class:`~tqsdk.sim.TqSim`
+                * None: 账号将根据环境变量决定, 默认为 :py:class:`~tqsdk.sim.TqSim`
 
-                * :py:class:`~tqsdk.api.TqAccount` : 使用实盘账号, 直连行情和交易服务器(不通过天勤终端), 需提供期货公司/帐号/密码
+                * :py:class:`~tqsdk.account.TqAccount` : 使用实盘账号, 直连行情和交易服务器, 需提供期货公司/帐号/密码
 
                 * :py:class:`~tqsdk.sim.TqSim` : 使用 TqApi 自带的内部模拟账号
 
@@ -76,7 +74,7 @@ class TqApi(object):
                 天勤论坛注册链接 https://www.shinnytech.com/register-intro/
 
             url (str): [可选]指定服务器的地址
-                * 当 account 为 :py:class:`~tqsdk.api.TqAccount` 类型时, 可以通过该参数指定交易服务器地址, \
+                * 当 account 为 :py:class:`~tqsdk.account.TqAccount` 类型时, 可以通过该参数指定交易服务器地址, \
                 默认使用 wss://opentd.shinnytech.com/trade/user0, 行情始终使用 wss://openmd.shinnytech.com/t/md/front/mobile
 
                 * 当 account 为 :py:class:`~tqsdk.sim.TqSim` 类型时, 可以通过该参数指定行情服务器地址,\
@@ -161,12 +159,9 @@ class TqApi(object):
         # 记录参数
         self._account = TqSim() if account is None else account
         self._backtest = backtest
-        self._ins_url = TqApi.DEFAULT_INS_URL
-        self._md_url = TqApi.DEFAULT_MD_URL
-        self._td_url = TqApi.DEFAULT_TD_URL
 
         # 支持用户授权
-        self._access_token = 'eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJobi1MZ3ZwbWlFTTJHZHAtRmlScjV5MUF5MnZrQmpLSFFyQVlnQ0UwR1JjIn0.eyJqdGkiOiJjZDAzM2JhNC1lZTJkLTRhNjUtYmVjNi04NTAyZmQyMjk4NmUiLCJleHAiOjE2MTI0MDQwMTEsIm5iZiI6MCwiaWF0IjoxNTgwODY4MDExLCJpc3MiOiJodHRwczovL2F1dGguc2hpbm55dGVjaC5jb20vYXV0aC9yZWFsbXMvc2hpbm55dGVjaCIsInN1YiI6IjYzMzJhZmUwLWU5OWQtNDc1OC04MjIzLWY5OTBiN2RmOGY4NSIsInR5cCI6IkJlYXJlciIsImF6cCI6InNoaW5ueV90cSIsImF1dGhfdGltZSI6MCwic2Vzc2lvbl9zdGF0ZSI6IjliNTY1MzYzLTRkNmEtNDc0ZS1hYmMzLTQ0YzU0N2ZhMDZjYiIsImFjciI6IjEiLCJzY29wZSI6ImF0dHJpYnV0ZXMiLCJncmFudHMiOnsiZmVhdHVyZXMiOlsiYWR2Il0sImFjY291bnRzIjpbIioiXX19.OtSweF6mXilJNkQwJQR38BTdYWfShxJrlUIxvHRoZ6AZMtJ9pRMx1SS9mmO9SmA_OPBouLybDmPFbcAMK6_Z4hXNYzd1TyXbPMNIPaMg7E12IEe6RxmsP15j-txfB3lC8LJlc9ey9Y-Hbg2goxS9RCj5m5PR8MuHYwx_E1PwEkOkoBw0eJG5jT0gVh8nHN_p7zsbXOo0PVVNxK1ZBuU-t5NeHy3E33LAOxG1VjqAeOrE4YZrprKcHu6ekd4WPy77cllSRMX6Ob2i9uIFmErbtFK76eYJoPmetSEljAcXwjg3_vWcYOj-xzCeFZoaV9ysNvbANzCS0nAelMvWlBHrkA'
+        self._access_token = 'eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJobi1MZ3ZwbWlFTTJHZHAtRmlScjV5MUF5MnZrQmpLSFFyQVlnQ0UwR1JjIn0.eyJqdGkiOiIwY2UwOTM2Ny0xYjk2LTQ0NTktOGU2My1hYWM1ZTA3Mjc1ZTIiLCJleHAiOjE2MTU1Mzk1MTQsIm5iZiI6MCwiaWF0IjoxNTg0MDAzNTE0LCJpc3MiOiJodHRwczovL2F1dGguc2hpbm55dGVjaC5jb20vYXV0aC9yZWFsbXMvc2hpbm55dGVjaCIsInN1YiI6IjYzMzJhZmUwLWU5OWQtNDc1OC04MjIzLWY5OTBiN2RmOGY4NSIsInR5cCI6IkJlYXJlciIsImF6cCI6InNoaW5ueV90cSIsImF1dGhfdGltZSI6MCwic2Vzc2lvbl9zdGF0ZSI6IjUzYTEyYmNkLTc3M2EtNDcyZC1iZWVlLWZlMmQ1ODAzYjU0YyIsImFjciI6IjEiLCJzY29wZSI6ImF0dHJpYnV0ZXMiLCJncmFudHMiOnsiZmVhdHVyZXMiOlsiY21iIiwiYWR2Il0sImFjY291bnRzIjpbIioiXX19.BmqzmorwITPd2YLP9EbhlIxkTDNTAY-PNPfM9LwOkOc5XJlSK34nHZwW14mmIScYiohhN5iaVtPrPNsohFfPcH-FxhFmmr9M_xIJLDf4zw2ObcZwVGTQFnIExjdpj2ej82bPT0yoBBFoOH3NhFuK0agifE0WOp0lXf2kzQsQncZ-y9djCEuwbuZapNmdVhGsWWGt7gMd9ZJNrmViZifSWkOrpiowIQ4fOPp1L2DJju8QldwHtyPnYTZtN56x14Xd7v-4-VB3vWEoHB99r36bjhlXJsxuiZrQom0esahgtV_7gx_G95bN04XevriRXG9JzOSoHhpYQFKqjZlSQ4L7vw'
         if auth:
             comma_index = auth.find(',')
             email, pwd = auth[:comma_index], auth[comma_index + 1:]
@@ -185,21 +180,13 @@ class TqApi(object):
             else:
                 self._logger.warning("用户权限认证失败 (%d,%s)" % (response.status_code, response.content))
 
+        self._ins_url = os.getenv("TQ_INS_URL", "https://openmd.shinnytech.com/t/md/symbols/latest.json")
+        self._md_url = os.getenv("TQ_MD_URL", "wss://openmd.shinnytech.com/t/md/front/mobile")
+        self._td_url = os.getenv("TQ_TD_URL", None)
         if url and isinstance(self._account, TqSim):
             self._md_url = url
-        if isinstance(self._account, TqAccount):
-            if url:
-                self._td_url = url
-            else:
-                # 支持分散部署的交易中继网关
-                response = requests.get("https://files.shinnytech.com/broker-list.json", headers=self._base_headers,
-                                        timeout=30)
-                broker_list = json.loads(response.content)
-                if self._account._broker_id not in broker_list:
-                    raise Exception("不支持该期货公司-%s，请联系期货公司。" % (self._account._broker_id))
-                if "TQ" not in broker_list[self._account._broker_id]["category"]:
-                    raise Exception("不支持该期货公司-%s，请联系期货公司。" % (self._account._broker_id))
-                self._td_url = broker_list[self._account._broker_id]["url"]
+        if url and isinstance(self._account, TqAccount):
+            self._td_url = url
         if _ins_url:
             self._ins_url = _ins_url
         if _md_url:
@@ -278,7 +265,7 @@ class TqApi(object):
         # 将当前api的_data值复制到_copy_diff中, 然后merge到副本api的_data里
         _copy_diff = {}
         TqApi._deep_copy_dict(self._data, _copy_diff)
-        slave_api._merge_diff(slave_api._data, _copy_diff, slave_api._prototype, False)
+        _merge_diff(slave_api._data, _copy_diff, slave_api._prototype, False)
         return slave_api
 
     def close(self) -> None:
@@ -348,7 +335,7 @@ class TqApi(object):
         """
         if symbol not in self._data.get("quotes", {}):
             raise Exception("代码 %s 不存在, 请检查合约代码是否填写正确" % (symbol))
-        quote = self._get_obj(self._data, ["quotes", symbol], self._prototype["quotes"]["#"])
+        quote = _get_obj(self._data, ["quotes", symbol], self._prototype["quotes"]["#"])
         if symbol not in self._requests["quotes"]:
             self._requests["quotes"].add(symbol)
             self._send_pack({
@@ -474,7 +461,7 @@ class TqApi(object):
         serial = self._requests["klines"].get(request, None)
         pack = {
             "aid": "set_chart",
-            "chart_id": chart_id if chart_id is not None else self._generate_chart_id("realtime"),
+            "chart_id": chart_id if chart_id is not None else _generate_uuid("PYSDK_realtime"),
             "ins_list": ",".join(symbol),
             "duration": dur_id,
             "view_width": data_length if len(symbol) == 1 else 8964,
@@ -483,9 +470,9 @@ class TqApi(object):
         if serial is None or chart_id is not None:  # 判断用户是否指定了 chart_id（参数）, 如果指定了，则一定会发送新的请求。
             self._send_pack(pack.copy())  # 注意：将数据权转移给TqChan时其所有权也随之转移，因pack还需要被用到，所以传入副本
         if serial is None:
-            serial = self._init_serial([self._get_obj(self._data, ["klines", s, str(dur_id)]) for s in symbol],
+            serial = self._init_serial([_get_obj(self._data, ["klines", s, str(dur_id)]) for s in symbol],
                                        data_length, self._prototype["klines"]["*"]["*"]["data"]["@"])
-            serial["chart"] = self._get_obj(self._data, ["charts", pack["chart_id"]])  # 保存chart信息
+            serial["chart"] = _get_obj(self._data, ["charts", pack["chart_id"]])  # 保存chart信息
             serial["chart"].update(pack)
             self._requests["klines"][request] = serial
             self._serials[id(serial["df"])] = serial
@@ -559,7 +546,7 @@ class TqApi(object):
         serial = self._requests["ticks"].get(request, None)
         pack = {
             "aid": "set_chart",
-            "chart_id": chart_id if chart_id is not None else self._generate_chart_id("realtime"),
+            "chart_id": chart_id if chart_id is not None else _generate_uuid("PYSDK_realtime"),
             "ins_list": symbol,
             "duration": 0,
             "view_width": data_length,
@@ -567,9 +554,9 @@ class TqApi(object):
         if serial is None or chart_id is not None:  # 判断用户是否指定了 chart_id（参数）, 如果指定了，则一定会发送新的请求。
             self._send_pack(pack.copy())  # pack 的副本数据和所有权转移给TqChan
         if serial is None:
-            serial = self._init_serial([self._get_obj(self._data, ["ticks", symbol])], data_length,
+            serial = self._init_serial([_get_obj(self._data, ["ticks", symbol])], data_length,
                                        self._prototype["ticks"]["*"]["data"]["@"])
-            serial["chart"] = self._get_obj(self._data, ["charts", pack["chart_id"]])
+            serial["chart"] = _get_obj(self._data, ["charts", pack["chart_id"]])
             serial["chart"].update(pack)
             self._requests["ticks"][request] = serial
             self._serials[id(serial["df"])] = serial
@@ -631,7 +618,7 @@ class TqApi(object):
             raise Exception("下单手数(volume) %s 错误, 请检查 volume 是否填写正确" % (volume))
         limit_price = float(limit_price) if limit_price is not None else None
         if not order_id:
-            order_id = self._generate_order_id()
+            order_id = _generate_uuid()
         (exchange_id, instrument_id) = symbol.split(".", 1)
         msg = {
             "aid": "insert_order",
@@ -744,7 +731,7 @@ class TqApi(object):
             2080.0
             ...
         """
-        return self._get_obj(self._data, ["trade", self._account._account_id, "accounts", "CNY"],
+        return _get_obj(self._data, ["trade", self._account._account_id, "accounts", "CNY"],
                              self._prototype["trade"]["*"]["accounts"]["@"])
 
     # ----------------------------------------------------------------------
@@ -783,9 +770,9 @@ class TqApi(object):
         if symbol:
             if symbol not in self._data.get("quotes", {}):
                 raise Exception("代码 %s 不存在, 请检查合约代码是否填写正确" % (symbol))
-            return self._get_obj(self._data, ["trade", self._account._account_id, "positions", symbol],
+            return _get_obj(self._data, ["trade", self._account._account_id, "positions", symbol],
                                  self._prototype["trade"]["*"]["positions"]["@"])
-        return self._get_obj(self._data, ["trade", self._account._account_id, "positions"])
+        return _get_obj(self._data, ["trade", self._account._account_id, "positions"])
 
     # ----------------------------------------------------------------------
     def get_order(self, order_id: Optional[str] = None) -> Union[Order, Entity]:
@@ -822,9 +809,9 @@ class TqApi(object):
             ...
         """
         if order_id:
-            return self._get_obj(self._data, ["trade", self._account._account_id, "orders", order_id],
+            return _get_obj(self._data, ["trade", self._account._account_id, "orders", order_id],
                                  self._prototype["trade"]["*"]["orders"]["@"])
-        return self._get_obj(self._data, ["trade", self._account._account_id, "orders"])
+        return _get_obj(self._data, ["trade", self._account._account_id, "orders"])
 
     # ----------------------------------------------------------------------
     def get_trade(self, trade_id: Optional[str] = None) -> Union[Trade, Entity]:
@@ -845,9 +832,9 @@ class TqApi(object):
 
         """
         if trade_id:
-            return self._get_obj(self._data, ["trade", self._account._account_id, "trades", trade_id],
+            return _get_obj(self._data, ["trade", self._account._account_id, "trades", trade_id],
                                  self._prototype["trade"]["*"]["trades"]["@"])
-        return self._get_obj(self._data, ["trade", self._account._account_id, "trades"])
+        return _get_obj(self._data, ["trade", self._account._account_id, "trades"])
 
     # ----------------------------------------------------------------------
     def wait_update(self, deadline: Optional[float] = None) -> None:
@@ -869,7 +856,6 @@ class TqApi(object):
             bool: 如果收到业务数据更新则返回 True, 如果到截止时间依然没有收到业务数据更新则返回 False
 
         注意:
-            * 天勤终端里策略日志窗口输出的内容由每次调用wait_update()时发出.
             * 由于存在网络延迟, 因此有数据更新不代表之前发出的所有请求都被处理了, 例如::
 
                 from tqsdk import TqApi
@@ -913,7 +899,7 @@ class TqApi(object):
             # 清空K线更新范围，避免在 wait_update 未更新K线时仍通过 is_changing 的判断
             self._klines_update_range = {}
             for d in self._diffs:
-                self._merge_diff(self._data, d, self._prototype, False)
+                _merge_diff(self._data, d, self._prototype, False)
             for _, serial in self._serials.items():
                 # K线df的更新与原始数据、left_id、right_id、more_data、last_id相关，其中任何一个发生改变都应重新计算df
                 # 注：订阅某K线后再订阅合约代码、周期相同但长度更短的K线时, 服务器不会再发送已有数据到客户端，即chart发生改变但内存中原始数据未改变。
@@ -1024,11 +1010,11 @@ class TqApi(object):
                         m_k = int(m.group(2))
                         k_dict.setdefault(m_k, []).append(m.group(1))
                 for k_id, v in k_dict.items():
-                    if self._is_key_exist(diff, paths[k_id], v):
+                    if _is_key_exist(diff, paths[k_id], v):
                         return True
             else:  # 如果没有传入key：遍历所有path
                 for path in paths:
-                    if self._is_key_exist(diff, path, key):
+                    if _is_key_exist(diff, path, key):
                         return True
         return False
 
@@ -1098,7 +1084,7 @@ class TqApi(object):
         return task
 
     # ----------------------------------------------------------------------
-    def register_update_notify(self, obj: Optional[Any] = None, chan: Optional['TqChan'] = None) -> 'TqChan':
+    def register_update_notify(self, obj: Optional[Any] = None, chan: Optional[TqChan] = None) -> TqChan:
         """
         注册一个channel以便接受业务数据更新通知
 
@@ -1211,6 +1197,17 @@ class TqApi(object):
             self.create_task(
                 self._account._run(self, self._send_chan, self._recv_chan, ws_md_send_chan, ws_md_recv_chan))
         else:
+            # _td_url 如果还是默认地址，即用户没有特别指定，换成期货公司交易地址，否则不做处理
+            if self._td_url is None:
+                # 交易中继网关
+                response = requests.get("https://files.shinnytech.com/broker-list.json", headers=self._base_headers,
+                                        timeout=30)
+                broker_list = json.loads(response.content)
+                if self._account._broker_id not in broker_list:
+                    raise Exception("不支持该期货公司-%s，请联系期货公司。" % self._account._broker_id)
+                if "TQ" not in broker_list[self._account._broker_id]["category"]:
+                    raise Exception("不支持该期货公司-%s，请联系期货公司。" % self._account._broker_id)
+                self._td_url = broker_list[self._account._broker_id]["url"]
             ws_td_send_chan, ws_td_recv_chan = TqChan(self), TqChan(self)
             self.create_task(self._connect(self._td_url, ws_td_send_chan, ws_td_recv_chan))
             self.create_task(
@@ -1251,6 +1248,8 @@ class TqApi(object):
                 "expire_datetime": v.get("expire_datetime"),
                 "delivery_month": v.get("delivery_month"),
                 "delivery_year": v.get("delivery_year"),
+                "option_class": v.get("option_class", ""),
+                "product_id": v.get("product_id", ""),
             } for k, v in rsp.json().items()
         }
 
@@ -1318,7 +1317,7 @@ class TqApi(object):
 
         for i in range(serial["update_row"], serial["width"]):
             index = last_id - serial["width"] + 1 + i
-            item = serial["default"] if index < 0 else TqApi._get_obj(serial["root"][0], ["data", str(index)],
+            item = serial["default"] if index < 0 else _get_obj(serial["root"][0], ["data", str(index)],
                                                                       serial["default"])
             array[i] = [item["datetime"]] + [index] + [item[k] for k in serial["default"].keys() if k != "datetime"]
 
@@ -1562,7 +1561,7 @@ class TqApi(object):
         """将从服务器收到的通知打印出来"""
         notify_logger = self._logger.getChild("Notify")
         processed_notify = set()
-        notify = self._get_obj(self._data, ["notify"])
+        notify = _get_obj(self._data, ["notify"])
         async with self.register_update_notify(notify) as update_chan:
             async for _ in update_chan:
                 all_notifies = {k for k in notify if not k.startswith("_")}
@@ -1593,7 +1592,7 @@ class TqApi(object):
             try:
                 async with websockets.connect(url, **keywords) as client:
                     # 发送网络连接建立的通知，code = 2019112901
-                    notify_id = uuid.UUID(int=TqApi.RD.getrandbits(128)).hex
+                    notify_id = _generate_uuid()
                     notify = {
                         "type": "MESSAGE",
                         "level": "INFO",
@@ -1640,11 +1639,11 @@ class TqApi(object):
                                 pack_data = pack.get("data", [])
                                 t_pending_diffs.extend(pack_data)
                                 for d in pack_data:
-                                    self._merge_diff(t_data, d, self._prototype, False)
+                                    _merge_diff(t_data, d, self._prototype, False)
                                 if url == self._md_url:  # 如果连接行情系统: 将断线前订阅的所有行情数据收集到一起后才同时发送给下游, 以保证数据完整
                                     # 处理seriesl(k线/tick)
                                     if not all(
-                                            [v.items() <= self._get_obj(t_data, ["charts", k, "state"]).items() for k, v
+                                            [v.items() <= _get_obj(t_data, ["charts", k, "state"]).items() for k, v
                                              in set_chart_packs.items()]):
                                         await client.send(json.dumps({
                                             "aid": "peek_message"
@@ -1653,8 +1652,8 @@ class TqApi(object):
                                                            '{"aid": "peek_message"}')
                                         continue  # 如果当前请求还没收齐回应, 不应继续处理
                                     # 在接收并处理完成指令后, 此时发送给客户端的数据包中的 left_id或right_id 至少有一个不是-1 , 并且 mdhis_more_data是False；否则客户端需要继续等待数据完全发送
-                                    if not all([(self._get_obj(t_data, ["charts", k]).get("left_id",
-                                                                                          -1) != -1 or self._get_obj(
+                                    if not all([(_get_obj(t_data, ["charts", k]).get("left_id",
+                                                                                          -1) != -1 or _get_obj(
                                         t_data, ["charts", k]).get("right_id", -1) != -1) and not t_data.get(
                                         "mdhis_more_data", True) for k in set_chart_packs.keys()]):
                                         await client.send(json.dumps({
@@ -1671,7 +1670,7 @@ class TqApi(object):
                                                 path = ["klines", symbol, str(v["duration"])] if v[
                                                                                                      "duration"] != 0 else [
                                                     "ticks", symbol]
-                                                serial = self._get_obj(t_data, path)
+                                                serial = _get_obj(t_data, path)
                                                 if serial.get("last_id", -1) == -1:
                                                     all_received = False
                                                     break
@@ -1731,7 +1730,7 @@ class TqApi(object):
             # 而这里的 except 又需要处理所有子函数及子函数的子函数等等可能抛出的例外, 因此这里只能遇到问题之后再补, 并且无法避免 false positive 和 false negative
             except (websockets.exceptions.ConnectionClosed, OSError):
                 # 发送网络连接断开的通知，code = 2019112911
-                notify_id = uuid.UUID(int=TqApi.RD.getrandbits(128)).hex
+                notify_id = _generate_uuid()
                 notify = {
                     "type": "MESSAGE",
                     "level": "WARNING",
@@ -1801,88 +1800,6 @@ class TqApi(object):
         }
         return headers
 
-    @staticmethod
-    def _merge_diff(result, diff, prototype, persist):
-        """更新业务数据,并同步发送更新通知，保证业务数据的更新和通知是原子操作"""
-        for key in list(diff.keys()):
-            value_type = type(diff[key])
-            if value_type is str and key in prototype and not type(prototype[key]) is str:
-                diff[key] = prototype[key]
-            if diff[key] is None:
-                if persist or "#" in prototype:
-                    del diff[key]
-                else:
-                    dv = result.pop(key, None)
-                    TqApi._notify_update(dv, True)
-            elif value_type is dict or value_type is Entity:
-                default = None
-                tpersist = persist
-                if key in prototype:
-                    tpt = prototype[key]
-                elif "*" in prototype:
-                    tpt = prototype["*"]
-                elif "@" in prototype:
-                    tpt = prototype["@"]
-                    default = tpt
-                elif "#" in prototype:
-                    tpt = prototype["#"]
-                    default = tpt
-                    tpersist = True
-                else:
-                    tpt = {}
-                target = TqApi._get_obj(result, [key], default=default)
-                TqApi._merge_diff(target, diff[key], tpt, tpersist)
-                if len(diff[key]) == 0:
-                    del diff[key]
-            elif key in result and (
-                    result[key] == diff[key] or (diff[key] != diff[key] and result[key] != result[key])):
-                # 判断 diff[key] != diff[key] and result[key] != result[key] 以处理 value 为 nan 的情况
-                del diff[key]
-            else:
-                result[key] = diff[key]
-        if len(diff) != 0:
-            TqApi._notify_update(result, False)
-
-    @staticmethod
-    def _notify_update(target, recursive):
-        """同步通知业务数据更新"""
-        if isinstance(target, dict) or isinstance(target, Entity):
-            for q in target["_listener"]:
-                q.send_nowait(True)
-            if recursive:
-                for v in target.values():
-                    TqApi._notify_update(v, recursive)
-
-    @staticmethod
-    def _get_obj(root, path, default=None):
-        """获取业务数据"""
-        d = root
-        for i in range(len(path)):
-            if path[i] not in d:
-                if i != len(path) - 1 or default is None:
-                    dv = Entity()
-                else:
-                    dv = copy.copy(default)
-                dv._instance_entity(d["_path"] + [path[i]])
-
-                d[path[i]] = dv
-            d = d[path[i]]
-        return d
-
-    @staticmethod
-    def _is_key_exist(diff, path, key):
-        """判断指定数据是否存在"""
-        for p in path:
-            if not isinstance(diff, dict) or p not in diff:
-                return False
-            diff = diff[p]
-        if not isinstance(diff, dict):
-            return False
-        for k in key:
-            if k in diff:
-                return True
-        return len(key) == 0
-
     def _gen_prototype(self):
         """所有业务数据的原型"""
         return {
@@ -1922,44 +1839,6 @@ class TqApi(object):
                 }
             },
         }
-
-    @staticmethod
-    def _generate_chart_id(module):
-        """生成chart id"""
-        chart_id = "PYSDK_" + module + "_" + uuid.UUID(int=TqApi.RD.getrandbits(128)).hex
-        return chart_id
-
-    @staticmethod
-    def _generate_order_id():
-        """生成order id"""
-        return uuid.UUID(int=TqApi.RD.getrandbits(128)).hex
-
-    @staticmethod
-    def _get_trading_day_start_time(trading_day):
-        """给定交易日, 获得交易日起始时间"""
-        begin_mark = 631123200000000000  # 1990-01-01
-        start_time = trading_day - 21600000000000  # 6小时
-        week_day = (start_time - begin_mark) // 86400000000000 % 7
-        if week_day >= 5:
-            start_time -= 86400000000000 * (week_day - 4)
-        return start_time
-
-    @staticmethod
-    def _get_trading_day_end_time(trading_day):
-        """给定交易日, 获得交易日结束时间"""
-        return trading_day + 64799999999999  # 18小时
-
-    @staticmethod
-    def _get_trading_day_from_timestamp(timestamp):
-        """给定时间, 获得其所属的交易日"""
-        begin_mark = 631123200000000000  # 1990-01-01
-        days = (timestamp - begin_mark) // 86400000000000  # 自 1990-01-01 以来的天数
-        if (timestamp - begin_mark) % 86400000000000 >= 64800000000000:  # 大于18点, 天数+1
-            days += 1
-        week_day = days % 7
-        if week_day >= 5:  # 如果是周末则移到星期一
-            days += 7 - week_day
-        return begin_mark + days * 86400000000000
 
     @staticmethod
     def _deep_copy_dict(source, dest):
@@ -2025,7 +1904,7 @@ class TqApi(object):
             api.draw_text(klines, "测试413423", x=indic, y=value, color=0xFF00FF00)
         """
         if id is None:
-            id = uuid.UUID(int=TqApi.RD.getrandbits(128)).hex
+            id = _generate_uuid()
         if y is None:
             y = base_k_dataframe["close"].iloc[-1]
         serial = {
@@ -2068,7 +1947,7 @@ class TqApi(object):
             width (int): 线宽度, 可选, 缺省为 1
         """
         if id is None:
-            id = uuid.UUID(int=TqApi.RD.getrandbits(128)).hex
+            id = _generate_uuid()
         serial = {
             "type": line_type,
             "x1": self._offset_to_x(base_k_dataframe, x1),
@@ -2119,7 +1998,7 @@ class TqApi(object):
             y2=klines.iloc[-1].close, width=1, color=0xFF0000FF, bg_color=0x8000FF00)
         """
         if id is None:
-            id = uuid.UUID(int=TqApi.RD.getrandbits(128)).hex
+            id = _generate_uuid()
         serial = {
             "type": "BOX",
             "x1": self._offset_to_x(base_k_dataframe, x1),
@@ -2157,206 +2036,4 @@ class TqApi(object):
             return int(base_k_dataframe["id"].iloc[0]) + x
 
 
-class TqAccount(object):
-    """天勤实盘类"""
-
-    def __init__(self, broker_id: str, account_id: str, password: str, front_broker: Optional[str] = None,
-                 front_url: Optional[str] = None) -> None:
-        """
-        创建天勤实盘实例
-
-        Args:
-            broker_id (str): 期货公司, 可以在天勤终端中查看期货公司名称
-
-            account_id (str): 帐号
-
-            password (str): 密码
-
-            front_broker(str): [可选]CTP交易前置的Broker ID, 用于连接次席服务器, eg: "2020"
-
-            front_url(str): [可选]CTP交易前置地址, 用于连接次席服务器, eg: "tcp://1.2.3.4:1234/"
-        """
-        if bool(front_broker) != bool(front_url):
-            raise Exception("front_broker 和 front_url 参数需同时填写")
-
-        self._broker_id = broker_id
-        self._account_id = account_id
-        self._password = password
-        self._front_broker = front_broker
-        self._front_url = front_url
-        self._app_id = "SHINNY_TQ_1.0"
-        self._system_info = ""
-        try:
-            l = ctypes.c_int(344)
-            buf = ctypes.create_string_buffer(l.value)
-            lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ctpse")
-            if sys.platform.startswith("win"):
-                if ctypes.sizeof(ctypes.c_voidp) == 4:
-                    selib = ctypes.cdll.LoadLibrary(os.path.join(lib_path, "WinDataCollect32.dll"))
-                    ret = getattr(selib, "?CTP_GetSystemInfo@@YAHPADAAH@Z")(buf, ctypes.byref(l))
-                else:
-                    selib = ctypes.cdll.LoadLibrary(os.path.join(lib_path, "WinDataCollect64.dll"))
-                    ret = getattr(selib, "?CTP_GetSystemInfo@@YAHPEADAEAH@Z")(buf, ctypes.byref(l))
-            elif sys.platform.startswith("linux"):
-                selib = ctypes.cdll.LoadLibrary(os.path.join(lib_path, "LinuxDataCollect64.so"))
-                ret = selib._Z17CTP_GetSystemInfoPcRi(buf, ctypes.byref(l))
-            else:
-                raise Exception("不支持该平台")
-            if ret == 0:
-                self._system_info = base64.b64encode(buf.raw[:l.value]).decode("utf-8")
-            else:
-                raise Exception("错误码: %d" % ret)
-        except Exception as e:
-            logging.getLogger("TqApi.TqAccount").debug("采集穿透式监管客户端信息失败: %s" % e)
-
-    async def _run(self, api, api_send_chan, api_recv_chan, md_send_chan, md_recv_chan, td_send_chan, td_recv_chan):
-        req = {
-            "aid": "req_login",
-            "bid": self._broker_id,
-            "user_name": self._account_id,
-            "password": self._password,
-        }
-        if self._system_info:
-            req["client_app_id"] = self._app_id
-            req["client_system_info"] = self._system_info
-        if self._front_broker:
-            req["broker_id"] = self._front_broker
-            req["front"] = self._front_url
-        await td_send_chan.send(req)
-        await td_send_chan.send({
-            "aid": "confirm_settlement"
-        })  # 自动发送确认结算单
-        md_task = api.create_task(self._md_handler(api_recv_chan, md_send_chan, md_recv_chan))
-        td_task = api.create_task(self._td_handler(api_recv_chan, td_send_chan, td_recv_chan))
-        try:
-            async for pack in api_send_chan:
-                if pack["aid"] == "subscribe_quote" or pack["aid"] == "set_chart":
-                    await md_send_chan.send(pack)
-                elif pack["aid"] != "peek_message":
-                    await td_send_chan.send(pack)
-        finally:
-            md_task.cancel()
-            td_task.cancel()
-
-    async def _md_handler(self, api_recv_chan, md_send_chan, md_recv_chan):
-        async for pack in md_recv_chan:
-            await md_send_chan.send({
-                "aid": "peek_message"
-            })
-            await api_recv_chan.send(pack)
-
-    async def _td_handler(self, api_recv_chan, td_send_chan, td_recv_chan):
-        async for pack in td_recv_chan:
-            await td_send_chan.send({
-                "aid": "peek_message"
-            })
-            await api_recv_chan.send(pack)
-
-
-class TqChan(asyncio.Queue):
-    """用于协程间通讯的channel"""
-
-    def __init__(self, api: 'TqApi', last_only: bool = False) -> None:
-        """
-        创建channel实例
-
-        Args:
-            last_only (bool): 为True时只存储最后一个发送到channel的对象
-        """
-        asyncio.Queue.__init__(self, loop=api._loop)
-        self._api = api
-        self._last_only = last_only
-        self._closed = False
-
-    async def close(self) -> None:
-        """
-        关闭channel
-
-        关闭后send将不起作用,recv在收完剩余数据后会立即返回None
-        """
-        if not self._closed:
-            self._closed = True
-            await asyncio.Queue.put(self, None)
-
-    async def send(self, item: Any) -> None:
-        """
-        异步发送数据到channel中
-
-        Args:
-            item (any): 待发送的对象
-        """
-        if not self._closed:
-            if self._last_only:
-                while not self.empty():
-                    asyncio.Queue.get_nowait(self)
-            await asyncio.Queue.put(self, item)
-
-    def send_nowait(self, item: Any) -> None:
-        """
-        尝试立即发送数据到channel中
-
-        Args:
-            item (any): 待发送的对象
-
-        Raises:
-            asyncio.QueueFull: 如果channel已满则会抛出 asyncio.QueueFull
-        """
-        if not self._closed:
-            if self._last_only:
-                while not self.empty():
-                    asyncio.Queue.get_nowait(self)
-            asyncio.Queue.put_nowait(self, item)
-
-    async def recv(self) -> Any:
-        """
-        异步接收channel中的数据，如果channel中没有数据则一直等待
-
-        Returns:
-            any: 收到的数据，如果channel已被关闭则会立即收到None
-        """
-        if self._closed and self.empty():
-            return None
-        return await asyncio.Queue.get(self)
-
-    def recv_nowait(self) -> Any:
-        """
-        尝试立即接收channel中的数据
-
-        Returns:
-            any: 收到的数据，如果channel已被关闭则会立即收到None
-
-        Raises:
-            asyncio.QueueFull: 如果channel中没有数据则会抛出 asyncio.QueueEmpty
-        """
-        if self._closed and self.empty():
-            return None
-        return asyncio.Queue.get_nowait(self)
-
-    def recv_latest(self, latest: Any) -> Any:
-        """
-        尝试立即接收channel中的最后一个数据
-
-        Args:
-            latest (any): 如果当前channel中没有数据或已关闭则返回该对象
-
-        Returns:
-            any: channel中的最后一个数据
-        """
-        while (self._closed and self.qsize() > 1) or (not self._closed and not self.empty()):
-            latest = asyncio.Queue.get_nowait(self)
-        return latest
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        value = await asyncio.Queue.get(self)
-        if self._closed and self.empty():
-            raise StopAsyncIteration
-        return value
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await self.close()
+print("在使用天勤量化之前，默认您已经知晓并同意以下免责条款，如果不同意请立即停止使用：https://www.shinnytech.com/blog/disclaimer/", file=sys.stderr)
